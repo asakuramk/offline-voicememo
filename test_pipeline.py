@@ -32,12 +32,19 @@ def main():
     if args.template:
         settings["active_template"] = args.template
 
+    mode = settings.get("llm_mode", "offline")
     print(f"[設定]")
     print(f"  Whisperモデル : {settings['whisper_model']}")
     print(f"  言語          : {settings['whisper_language']}")
     print(f"  テンプレート  : {settings['active_template']}")
-    print(f"  LM Studio URL : {settings['lmstudio_url']}")
-    print(f"  モデル        : {settings['lmstudio_model']}")
+    print(f"  LLMモード     : {mode}")
+    if mode == "online":
+        print(f"  API URL       : {settings.get('online_api_url', '')}")
+        print(f"  モデル        : {settings.get('online_model', '')}")
+        print(f"  APIキー       : {'設定済み' if settings.get('online_api_key') else '未設定'}")
+    else:
+        print(f"  LM Studio URL : {settings['lmstudio_url']}")
+        print(f"  モデル        : {settings['lmstudio_model']}")
     print()
 
     if args.audio:

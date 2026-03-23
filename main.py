@@ -72,6 +72,9 @@ class VoiceMemoApp(rumps.App):
         self._online_config_item = rumps.MenuItem(
             "オンライン設定...", callback=self.configure_online
         )
+        self._llm_test_item = rumps.MenuItem(
+            "LLM接続テスト...", callback=self.test_llm_connection
+        )
         self._dict_item = rumps.MenuItem(
             "変換辞書を編集...", callback=self.edit_dictionary
         )
@@ -92,6 +95,7 @@ class VoiceMemoApp(rumps.App):
             None,
             self._llm_mode_item,
             self._online_config_item,
+            self._llm_test_item,
             None,
             self._dict_item,
             self._show_raw_item,
@@ -187,18 +191,26 @@ class VoiceMemoApp(rumps.App):
             self._ui(lambda: setattr(self, "title", ICON_AI))
             notify("AI解析中...", raw_text[:80])
 
+            llm_error_msg = None
             try:
                 processed = self.llm.process(raw_text)
             except Exception as llm_err:
-                # LLM failed — fall back to raw transcription
-                notify("LLMエラー (生テキストを使用)", str(llm_err)[:80])
+                llm_error_msg = str(llm_err)
                 processed = raw_text
+
+            if llm_error_msg:
+                err = llm_error_msg
+                self._ui(lambda: rumps.alert(
+                    title="LLM接続エラー",
+                    message=f"{err}\n\n文字起こし原文をそのまま出力します。",
+                ))
 
             # Build final output (with or without raw transcription)
             if self.settings.get("show_raw_text", False):
-                output = f"【文字起こし原文】\n{raw_text}\n\n【AI解析結果】\n{processed}"
+                ai_block = f"【⚠️ LLM未接続 - 生テキスト】\n{processed}" if llm_error_msg else f"【AI解析結果】\n{processed}"
+                output = f"【文字起こし原文】\n{raw_text}\n\n{ai_block}"
             else:
-                output = processed
+                output = f"⚠️ LLM未接続\n{processed}" if llm_error_msg else processed
 
             self._last_result = output
             self.inserter.insert(output)
@@ -227,6 +239,40 @@ class VoiceMemoApp(rumps.App):
     # ------------------------------------------------------------------
     # LLM mode toggle
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # LLM connection test
+    # ------------------------------------------------------------------
+
+    def test_llm_connection(self, sender):
+        notify("LLMテスト中...", "")
+        threading.Thread(target=self._run_llm_test, daemon=True).start()
+
+    def _run_llm_test(self):
+        test_prompt = "「テスト成功」とだけ返してください。"
+        try:
+            client = self.llm._get_client()
+            model  = self.llm._resolve_model(client)
+            resp   = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": test_prompt}],
+                temperature=0,
+                max_tokens=50,
+            )
+            result = resp.choices[0].message.content.strip()
+            self._ui(lambda: rumps.alert(
+                title="LLM接続テスト — 成功",
+                message=f"モデル: {model}\n応答: {result}",
+            ))
+        except Exception as e:
+            err = str(e)
+            self._ui(lambda: rumps.alert(
+                title="LLM接続テスト — 失敗",
+                message=f"{err}\n\n確認事項:\n"
+                        "・LM Studioが起動しているか\n"
+                        "・モデルがロードされているか\n"
+                        "・Local Serverが開始されているか",
+            ))
 
     def _idle_title(self) -> str:
         if self.settings.get("llm_mode", "offline") == "online":
