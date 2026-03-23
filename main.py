@@ -18,6 +18,7 @@ from pathlib import Path
 import rumps
 
 from config.config_manager import ConfigManager
+from core.dictionary import Dictionary
 from core.hotkey import HotkeyListener
 from core.inserter import TextInserter
 from core.llm_client import LLMClient
@@ -44,6 +45,7 @@ class VoiceMemoApp(rumps.App):
         self.transcriber = Transcriber(self.settings)
         self.llm         = LLMClient(self.settings)
         self.inserter    = TextInserter()
+        self.dictionary  = Dictionary()
 
         self._state_lock    = threading.Lock()
         self._is_recording  = False
@@ -70,6 +72,9 @@ class VoiceMemoApp(rumps.App):
         self._online_config_item = rumps.MenuItem(
             "オンライン設定...", callback=self.configure_online
         )
+        self._dict_item = rumps.MenuItem(
+            "変換辞書を編集...", callback=self.edit_dictionary
+        )
         self._reload_item = rumps.MenuItem(
             "設定を再読み込み", callback=self.reload_settings
         )
@@ -83,6 +88,8 @@ class VoiceMemoApp(rumps.App):
             None,
             self._llm_mode_item,
             self._online_config_item,
+            None,
+            self._dict_item,
             None,
             self._reload_item,
         ]
@@ -166,6 +173,9 @@ class VoiceMemoApp(rumps.App):
             if not raw_text.strip():
                 notify("認識失敗", "音声が認識できませんでした")
                 return
+
+            # Apply user dictionary before sending to LLM
+            raw_text = self.dictionary.apply(raw_text)
 
             self._ui(lambda: setattr(self, "title", ICON_AI))
             notify("AI解析中...", raw_text[:80])
@@ -287,10 +297,35 @@ class VoiceMemoApp(rumps.App):
         notify("オンライン設定を保存しました", f"モデル: {model}")
         return True
 
+    # ------------------------------------------------------------------
+    # Dictionary editor
+    # ------------------------------------------------------------------
+
+    def edit_dictionary(self, sender):
+        win = rumps.Window(
+            message=(
+                "変換辞書を編集してください。\n"
+                "書式:「変換前 = 変換後」を1行ずつ。# はコメント行。"
+            ),
+            title="変換辞書の編集",
+            default_text=self.dictionary.to_editor_text(),
+            ok="保存",
+            cancel="キャンセル",
+            dimensions=(520, 300),
+        )
+        response = win.run()
+        if response.clicked:
+            self.dictionary.from_editor_text(response.text)
+            count = len(self.dictionary._entries)
+            notify("変換辞書を保存しました", f"{count} 件のエントリ")
+
+    # ------------------------------------------------------------------
+
     def reload_settings(self, sender):
         self.settings = self.config.load()
         self.transcriber.update_settings(self.settings)
         self.llm.update_settings(self.settings)
+        self.dictionary.load()
         self._build_template_menu()
         self._llm_mode_item.title = self._llm_mode_label()
         notify("設定再読み込み完了", "")
