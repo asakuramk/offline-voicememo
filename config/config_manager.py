@@ -9,11 +9,18 @@ DEFAULTS: dict = {
     "whisper_model": "small",
     "whisper_language": "ja",
     "whisper_device": "cpu",
+    # --- Offline (LM Studio) ---
     "lmstudio_url": "http://localhost:1234/v1",
     "lmstudio_model": "local-model",
     "lmstudio_temperature": 0.3,
     "lmstudio_max_tokens": 2048,
-    "active_template": "memo",
+    # --- Online API ---
+    "llm_mode": "offline",          # "offline" | "online"
+    "online_api_url": "https://api.openai.com/v1",
+    "online_api_key": "",
+    "online_model": "gpt-4o-mini",
+    # ---
+    "active_template": "summary",
     "restore_clipboard": True,
 }
 

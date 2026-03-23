@@ -71,29 +71,47 @@ class LLMClient:
                 max_tokens=int(self._settings.get("lmstudio_max_tokens", 2048)),
             )
         except APIConnectionError:
-            url = self._settings.get("lmstudio_url", "http://localhost:1234/v1")
-            raise RuntimeError(
-                f"LM Studio に接続できません ({url})\n"
-                "LM Studio を起動してモデルをロードし、Local Server を開始してください。"
-            )
+            if self.is_online():
+                url = self._settings.get("online_api_url", "https://api.openai.com/v1")
+                raise RuntimeError(
+                    f"オンラインAPIに接続できません ({url})\n"
+                    "APIキーとURLをメニュー「オンライン設定」で確認してください。"
+                )
+            else:
+                url = self._settings.get("lmstudio_url", "http://localhost:1234/v1")
+                raise RuntimeError(
+                    f"LM Studio に接続できません ({url})\n"
+                    "LM Studio を起動してモデルをロードし、Local Server を開始してください。"
+                )
         return response.choices[0].message.content.strip()
 
     def update_settings(self, settings: dict):
         self._settings = settings
-        self._client = None  # force reconnect
+        self._client = None  # force reconnect on next call
+
+    def is_online(self) -> bool:
+        return self._settings.get("llm_mode", "offline") == "online"
 
     def _get_client(self) -> "OpenAI":
         if self._client is None:
-            base_url = self._settings.get("lmstudio_url", "http://localhost:1234/v1")
-            self._client = OpenAI(base_url=base_url, api_key="lm-studio")
+            if self.is_online():
+                base_url = self._settings.get("online_api_url", "https://api.openai.com/v1")
+                api_key  = self._settings.get("online_api_key", "")
+            else:
+                base_url = self._settings.get("lmstudio_url", "http://localhost:1234/v1")
+                api_key  = "lm-studio"
+            self._client = OpenAI(base_url=base_url, api_key=api_key or "no-key")
         return self._client
 
     def _resolve_model(self, client: "OpenAI") -> str:
-        """Return the configured model name, or auto-detect the first loaded model."""
+        """Return model name for the current mode."""
+        if self.is_online():
+            return self._settings.get("online_model", "gpt-4o-mini")
+
+        # Offline: use configured name or auto-detect from LM Studio
         configured = self._settings.get("lmstudio_model", "local-model")
         if configured and configured != "local-model":
             return configured
-        # Auto-detect: ask LM Studio which models are available
         try:
             models = client.models.list()
             if models.data:

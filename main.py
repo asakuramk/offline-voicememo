@@ -64,6 +64,12 @@ class VoiceMemoApp(rumps.App):
             "最後の結果をコピー", callback=self.copy_last_result
         )
         self._template_menu = rumps.MenuItem("テンプレート")
+        self._llm_mode_item = rumps.MenuItem(
+            self._llm_mode_label(), callback=self.toggle_llm_mode
+        )
+        self._online_config_item = rumps.MenuItem(
+            "オンライン設定...", callback=self.configure_online
+        )
         self._reload_item = rumps.MenuItem(
             "設定を再読み込み", callback=self.reload_settings
         )
@@ -74,6 +80,9 @@ class VoiceMemoApp(rumps.App):
             self._copy_item,
             None,
             self._template_menu,
+            None,
+            self._llm_mode_item,
+            self._online_config_item,
             None,
             self._reload_item,
         ]
@@ -192,11 +201,98 @@ class VoiceMemoApp(rumps.App):
         else:
             notify("結果なし", "まだ録音・処理していません")
 
+    # ------------------------------------------------------------------
+    # LLM mode toggle
+    # ------------------------------------------------------------------
+
+    def _llm_mode_label(self) -> str:
+        mode = self.settings.get("llm_mode", "offline")
+        if mode == "online":
+            model = self.settings.get("online_model", "gpt-4o-mini")
+            return f"LLM: [オンライン]  {model}"
+        else:
+            return "LLM: [オフライン]  LM Studio"
+
+    def toggle_llm_mode(self, sender):
+        current = self.settings.get("llm_mode", "offline")
+        new_mode = "online" if current == "offline" else "offline"
+
+        if new_mode == "online" and not self.settings.get("online_api_key", "").strip():
+            # API key not set yet — open settings dialog first
+            if not self._run_online_config_dialog():
+                return  # user cancelled
+
+        self.settings["llm_mode"] = new_mode
+        self.config.save(self.settings)
+        self.llm.update_settings(self.settings)
+        self._llm_mode_item.title = self._llm_mode_label()
+        notify(
+            "LLMモード切替",
+            "オンライン (API)" if new_mode == "online" else "オフライン (LM Studio)",
+        )
+
+    def configure_online(self, sender):
+        self._run_online_config_dialog()
+
+    def _run_online_config_dialog(self) -> bool:
+        """Show 3 dialogs to set online API URL / key / model. Returns True if saved."""
+        # 1. API URL
+        win = rumps.Window(
+            message="オンラインAPIのエンドポイントURLを入力してください。\n(OpenAI互換であれば変更可)",
+            title="オンライン設定 (1/3) — API URL",
+            default_text=self.settings.get("online_api_url", "https://api.openai.com/v1"),
+            ok="次へ",
+            cancel="キャンセル",
+            dimensions=(420, 30),
+        )
+        r = win.run()
+        if not r.clicked:
+            return False
+        api_url = r.text.strip() or "https://api.openai.com/v1"
+
+        # 2. API Key
+        win = rumps.Window(
+            message="APIキーを入力してください。\n(OpenAI: sk-...  /  Anthropic: sk-ant-...  など)",
+            title="オンライン設定 (2/3) — APIキー",
+            default_text=self.settings.get("online_api_key", ""),
+            ok="次へ",
+            cancel="キャンセル",
+            dimensions=(420, 30),
+        )
+        r = win.run()
+        if not r.clicked:
+            return False
+        api_key = r.text.strip()
+
+        # 3. Model name
+        win = rumps.Window(
+            message="使用するモデル名を入力してください。\n例: gpt-4o-mini / gpt-4o / claude-opus-4-5",
+            title="オンライン設定 (3/3) — モデル名",
+            default_text=self.settings.get("online_model", "gpt-4o-mini"),
+            ok="保存",
+            cancel="キャンセル",
+            dimensions=(420, 30),
+        )
+        r = win.run()
+        if not r.clicked:
+            return False
+        model = r.text.strip() or "gpt-4o-mini"
+
+        self.settings["online_api_url"] = api_url
+        self.settings["online_api_key"] = api_key
+        self.settings["online_model"]   = model
+        self.config.save(self.settings)
+        self.llm.update_settings(self.settings)
+        self._llm_mode_item.title = self._llm_mode_label()
+        notify("オンライン設定を保存しました", f"モデル: {model}")
+        return True
+
     def reload_settings(self, sender):
         self.settings = self.config.load()
         self.transcriber.update_settings(self.settings)
         self.llm.update_settings(self.settings)
         self._build_template_menu()
+        self._llm_mode_item.title = self._llm_mode_label()
         notify("設定再読み込み完了", "")
 
     def _build_template_menu(self):
