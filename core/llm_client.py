@@ -5,7 +5,7 @@ Applies a prompt template to the raw transcription and returns structured text.
 from __future__ import annotations
 
 from typing import Optional, Dict
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError
 from pathlib import Path
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
@@ -57,18 +57,25 @@ class LLMClient:
         client = self._get_client()
         model = self._resolve_model(client)
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "あなたは日本語の音声文字起こしを整形するアシスタントです。指示通りに整形し、余計な説明は不要です。",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=float(self._settings.get("lmstudio_temperature", 0.3)),
-            max_tokens=int(self._settings.get("lmstudio_max_tokens", 2048)),
-        )
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "あなたは日本語の音声文字起こしを整形するアシスタントです。指示通りに整形し、余計な説明は不要です。",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=float(self._settings.get("lmstudio_temperature", 0.3)),
+                max_tokens=int(self._settings.get("lmstudio_max_tokens", 2048)),
+            )
+        except APIConnectionError:
+            url = self._settings.get("lmstudio_url", "http://localhost:1234/v1")
+            raise RuntimeError(
+                f"LM Studio に接続できません ({url})\n"
+                "LM Studio を起動してモデルをロードし、Local Server を開始してください。"
+            )
         return response.choices[0].message.content.strip()
 
     def update_settings(self, settings: dict):
@@ -91,6 +98,12 @@ class LLMClient:
             models = client.models.list()
             if models.data:
                 return models.data[0].id
+        except APIConnectionError:
+            url = self._settings.get("lmstudio_url", "http://localhost:1234/v1")
+            raise RuntimeError(
+                f"LM Studio に接続できません ({url})\n"
+                "LM Studio を起動してモデルをロードし、Local Server を開始してください。"
+            )
         except Exception:
             pass
         return configured

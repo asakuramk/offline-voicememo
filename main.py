@@ -207,12 +207,15 @@ class VoiceMemoApp(rumps.App):
 
         active = self.settings.get("active_template", "memo")
         templates = {
-            "memo":    "メモ整理",
-            "minutes": "議事録",
-            "tasks":   "タスクリスト",
-            "journal": "日記・ジャーナル",
-            "summary": "要約",
-            "raw":     "そのまま出力 (LLMなし)",
+            "memo":            "メモ整理",
+            "minutes":         "議事録",
+            "tasks":           "タスクリスト",
+            "journal":         "日記・ジャーナル",
+            "summary":         "要約",
+            "raw":             "そのまま出力 (LLMなし)",
+            "shosin":          "[医療] 問診",
+            "medical_summary": "[医療] 医療サマリー",
+            "soap":            "[医療] SOAP",
         }
         for f in sorted((BASE_DIR / "templates").glob("*.txt")):
             key = f.stem
