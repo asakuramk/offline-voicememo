@@ -22,6 +22,7 @@ DEFAULTS: dict = {
     # ---
     "active_template": "summary",
     "restore_clipboard": True,
+    "show_raw_text": False,   # prepend raw transcription to output
 }
 
 

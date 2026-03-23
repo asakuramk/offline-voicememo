@@ -65,7 +65,8 @@ class VoiceMemoApp(rumps.App):
         self._copy_item = rumps.MenuItem(
             "最後の結果をコピー", callback=self.copy_last_result
         )
-        self._template_menu = rumps.MenuItem("テンプレート")
+        self._template_menu      = rumps.MenuItem("テンプレートを選択")
+        self._edit_template_menu = rumps.MenuItem("テンプレートを編集")
         self._llm_mode_item = rumps.MenuItem(
             self._llm_mode_label(), callback=self.toggle_llm_mode
         )
@@ -74,6 +75,9 @@ class VoiceMemoApp(rumps.App):
         )
         self._dict_item = rumps.MenuItem(
             "変換辞書を編集...", callback=self.edit_dictionary
+        )
+        self._show_raw_item = rumps.MenuItem(
+            self._show_raw_label(), callback=self.toggle_show_raw
         )
         self._reload_item = rumps.MenuItem(
             "設定を再読み込み", callback=self.reload_settings
@@ -85,16 +89,19 @@ class VoiceMemoApp(rumps.App):
             self._copy_item,
             None,
             self._template_menu,
+            self._edit_template_menu,
             None,
             self._llm_mode_item,
             self._online_config_item,
             None,
             self._dict_item,
+            self._show_raw_item,
             None,
             self._reload_item,
         ]
 
         self._build_template_menu()
+        self._build_edit_template_menu()
 
         # --- Global hotkey listener (runs in background thread) ---
         self._hotkey_listener = HotkeyListener(
@@ -187,8 +194,14 @@ class VoiceMemoApp(rumps.App):
                 notify("LLMエラー (生テキストを使用)", str(llm_err)[:80])
                 processed = raw_text
 
-            self._last_result = processed
-            self.inserter.insert(processed)
+            # Build final output (with or without raw transcription)
+            if self.settings.get("show_raw_text", False):
+                output = f"【文字起こし原文】\n{raw_text}\n\n【AI解析結果】\n{processed}"
+            else:
+                output = processed
+
+            self._last_result = output
+            self.inserter.insert(output)
             notify("完了", processed[:100])
             self._save_session(audio_path, raw_text, processed)
 
@@ -320,6 +333,86 @@ class VoiceMemoApp(rumps.App):
             notify("変換辞書を保存しました", f"{count} 件のエントリ")
 
     # ------------------------------------------------------------------
+    # Template editor submenu
+    # ------------------------------------------------------------------
+
+    # Keys that can be edited (builtin + any .txt file)
+    EDITABLE_TEMPLATES = [
+        ("minutes",         "議事録"),
+        ("summary",         "要約"),
+        (None, None),
+        ("shosin",          "[医療] 問診"),
+        ("medical_summary", "[医療] 医療サマリー"),
+        ("soap",            "[医療] SOAP"),
+    ]
+
+    def _build_edit_template_menu(self):
+        if self._edit_template_menu._menu is not None:
+            self._edit_template_menu.clear()
+
+        fixed_keys = {k for k, _ in self.EDITABLE_TEMPLATES if k}
+
+        rows = list(self.EDITABLE_TEMPLATES)
+        custom = [
+            (f.stem, f"カスタム: {f.stem}")
+            for f in sorted((BASE_DIR / "templates").glob("*.txt"))
+            if f.stem not in fixed_keys
+        ]
+        if custom:
+            rows.append((None, None))
+            rows.extend(custom)
+
+        for row in rows:
+            if row is None or row[0] is None:
+                self._edit_template_menu.add(rumps.separator)
+                continue
+            key, label = row
+            self._edit_template_menu.add(rumps.MenuItem(
+                label, callback=self._make_edit_template_callback(key)
+            ))
+
+    def _make_edit_template_callback(self, key: str):
+        def callback(sender):
+            self._open_template_editor(key)
+        return callback
+
+    def _open_template_editor(self, key: str):
+        label_map = {k: l for k, l in self.EDITABLE_TEMPLATES if k}
+        label = label_map.get(key, key)
+        current = self.llm.get_template_content(key)
+        win = rumps.Window(
+            message=(
+                f"テンプレート「{label}」を編集してください。\n"
+                "{text} の部分に文字起こし結果が挿入されます。"
+            ),
+            title=f"テンプレートを編集: {label}",
+            default_text=current,
+            ok="保存",
+            cancel="キャンセル",
+            dimensions=(520, 320),
+        )
+        r = win.run()
+        if r.clicked and r.text.strip():
+            self.llm.save_template_content(key, r.text.strip())
+            notify(f"テンプレートを保存しました", label)
+
+    # ------------------------------------------------------------------
+    # Show raw text toggle
+    # ------------------------------------------------------------------
+
+    def _show_raw_label(self) -> str:
+        on = self.settings.get("show_raw_text", False)
+        return "原文を表示: ON" if on else "原文を表示: OFF"
+
+    def toggle_show_raw(self, sender):
+        current = self.settings.get("show_raw_text", False)
+        self.settings["show_raw_text"] = not current
+        self.config.save(self.settings)
+        self._show_raw_item.title = self._show_raw_label()
+        state = "ON" if self.settings["show_raw_text"] else "OFF"
+        notify("原文表示を変更しました", state)
+
+    # ------------------------------------------------------------------
 
     def reload_settings(self, sender):
         self.settings = self.config.load()
@@ -327,7 +420,9 @@ class VoiceMemoApp(rumps.App):
         self.llm.update_settings(self.settings)
         self.dictionary.load()
         self._build_template_menu()
+        self._build_edit_template_menu()
         self._llm_mode_item.title = self._llm_mode_label()
+        self._show_raw_item.title = self._show_raw_label()
         notify("設定再読み込み完了", "")
 
     def _build_template_menu(self):

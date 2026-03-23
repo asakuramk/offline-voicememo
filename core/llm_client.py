@@ -127,10 +127,20 @@ class LLMClient:
         return configured
 
     def _build_prompt(self, template_name: str, text: str) -> str:
-        # Custom template file takes precedence
-        custom = TEMPLATES_DIR / f"{template_name}.txt"
-        if custom.exists():
-            template = custom.read_text(encoding="utf-8")
-        else:
-            template = BUILTIN_TEMPLATES.get(template_name, BUILTIN_TEMPLATES["memo"])
-        return template.replace("{text}", text)
+        return self.get_template_content(template_name).replace("{text}", text)
+
+    # ------------------------------------------------------------------
+    # Template file helpers (used by the editor UI in main.py)
+    # ------------------------------------------------------------------
+
+    def get_template_content(self, key: str) -> str:
+        """Return editable template content: .txt file if exists, else builtin."""
+        path = TEMPLATES_DIR / f"{key}.txt"
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+        return BUILTIN_TEMPLATES.get(key, BUILTIN_TEMPLATES["summary"])
+
+    def save_template_content(self, key: str, content: str):
+        """Write content to templates/<key>.txt."""
+        TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+        (TEMPLATES_DIR / f"{key}.txt").write_text(content, encoding="utf-8")
