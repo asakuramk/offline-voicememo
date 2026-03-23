@@ -7,6 +7,6 @@
   "lmstudio_model": "local-model",
   "lmstudio_temperature": 0.3,
   "lmstudio_max_tokens": 2048,
-  "active_template": "memo",
+  "active_template": "soap",
   "restore_clipboard": true
 }

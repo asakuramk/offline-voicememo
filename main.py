@@ -205,30 +205,48 @@ class VoiceMemoApp(rumps.App):
         if self._template_menu._menu is not None:
             self._template_menu.clear()
 
-        active = self.settings.get("active_template", "memo")
-        templates = {
-            "memo":            "メモ整理",
-            "minutes":         "議事録",
-            "tasks":           "タスクリスト",
-            "journal":         "日記・ジャーナル",
-            "summary":         "要約",
-            "raw":             "そのまま出力 (LLMなし)",
-            "shosin":          "[医療] 問診",
-            "medical_summary": "[医療] 医療サマリー",
-            "soap":            "[医療] SOAP",
-        }
-        for f in sorted((BASE_DIR / "templates").glob("*.txt")):
-            key = f.stem
-            if key not in templates:
-                templates[key] = f"カスタム: {key}"
+        active = self.settings.get("active_template", "summary")
 
-        for key, label in templates.items():
+        # Fixed templates (key, display label); None = separator
+        FIXED = [
+            ("minutes",         "議事録"),
+            ("summary",         "要約"),
+            ("raw",             "そのまま出力 (LLMなし)"),
+            None,
+            ("shosin",          "[医療] 問診"),
+            ("medical_summary", "[医療] 医療サマリー"),
+            ("soap",            "[医療] SOAP"),
+        ]
+        fixed_keys = {row[0] for row in FIXED if row is not None}
+
+        # User-created .txt files not in the fixed list
+        custom_entries = [
+            (f.stem, f"カスタム: {f.stem}")
+            for f in sorted((BASE_DIR / "templates").glob("*.txt"))
+            if f.stem not in fixed_keys
+        ]
+
+        entries = list(FIXED)
+        if custom_entries:
+            entries.append(None)
+            entries.extend(custom_entries)
+
+        for row in entries:
+            if row is None:
+                self._template_menu.add(rumps.separator)
+                continue
+            key, label = row
             prefix = "* " if key == active else "  "
-            item = rumps.MenuItem(
+            self._template_menu.add(rumps.MenuItem(
                 f"{prefix}{label}",
                 callback=self._make_template_callback(key),
-            )
-            self._template_menu.add(item)
+            ))
+
+        # --- Custom prompt editor ---
+        self._template_menu.add(rumps.separator)
+        self._template_menu.add(
+            rumps.MenuItem("プロンプトを編集...", callback=self.edit_custom_prompt)
+        )
 
     def _make_template_callback(self, template_key: str):
         def callback(sender):
@@ -238,6 +256,34 @@ class VoiceMemoApp(rumps.App):
             self._build_template_menu()
             notify("テンプレート変更", template_key)
         return callback
+
+    def edit_custom_prompt(self, sender):
+        """Open a text-input window to create/edit a custom prompt template."""
+        custom_path = BASE_DIR / "templates" / "custom.txt"
+        current = (
+            custom_path.read_text(encoding="utf-8")
+            if custom_path.exists()
+            else "以下の音声文字起こしを整形してください。\n\n# 文字起こし\n{text}"
+        )
+        win = rumps.Window(
+            message=(
+                "カスタムプロンプトを入力してください。\n"
+                "{text} の部分に文字起こし結果が挿入されます。"
+            ),
+            title="カスタムプロンプトの編集",
+            default_text=current,
+            ok="保存して選択",
+            cancel="キャンセル",
+            dimensions=(520, 260),
+        )
+        response = win.run()
+        if response.clicked and response.text.strip():
+            custom_path.write_text(response.text.strip(), encoding="utf-8")
+            self.settings["active_template"] = "custom"
+            self.config.save(self.settings)
+            self.llm.update_settings(self.settings)
+            self._build_template_menu()
+            notify("カスタムプロンプトを保存しました", "テンプレート: custom")
 
     # ------------------------------------------------------------------
     # Session storage
