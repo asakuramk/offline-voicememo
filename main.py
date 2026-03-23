@@ -249,6 +249,39 @@ class VoiceMemoApp(rumps.App):
         threading.Thread(target=self._run_llm_test, daemon=True).start()
 
     def _run_llm_test(self):
+        import socket
+        url  = self.settings.get("lmstudio_url", "http://localhost:1234/v1")
+        mode = self.settings.get("llm_mode", "offline")
+        if mode == "online":
+            url = self.settings.get("online_api_url", "https://api.openai.com/v1")
+
+        # Step 1: TCP reachability check
+        try:
+            host = url.split("://")[-1].split("/")[0]
+            host, port = (host.rsplit(":", 1) if ":" in host else (host, "1234"))
+            sock = socket.create_connection((host, int(port)), timeout=2)
+            sock.close()
+        except Exception:
+            step1_fail = True
+        else:
+            step1_fail = False
+
+        if step1_fail:
+            if mode == "offline":
+                msg = (
+                    f"ポート {port} に接続できません。\n\n"
+                    "【手順】LM Studio を開く\n"
+                    "  1. 左サイドバーの「←→」アイコンをクリック\n"
+                    "  2. 上部でモデルを選択\n"
+                    "  3. 「Start Server」ボタンを押す\n"
+                    "  4. 「Server running on port 1234」と表示されたら再テスト"
+                )
+            else:
+                msg = f"オンラインAPI ({url}) に到達できません。\nネットワーク接続またはURLを確認してください。"
+            self._ui(lambda: rumps.alert(title="LLM接続テスト — 失敗 (到達不可)", message=msg))
+            return
+
+        # Step 2: API call test
         test_prompt = "「テスト成功」とだけ返してください。"
         try:
             client = self.llm._get_client()
@@ -262,16 +295,14 @@ class VoiceMemoApp(rumps.App):
             result = resp.choices[0].message.content.strip()
             self._ui(lambda: rumps.alert(
                 title="LLM接続テスト — 成功",
-                message=f"モデル: {model}\n応答: {result}",
+                message=f"モード : {mode}\nモデル : {model}\n応答  : {result}",
             ))
         except Exception as e:
             err = str(e)
             self._ui(lambda: rumps.alert(
-                title="LLM接続テスト — 失敗",
-                message=f"{err}\n\n確認事項:\n"
-                        "・LM Studioが起動しているか\n"
-                        "・モデルがロードされているか\n"
-                        "・Local Serverが開始されているか",
+                title="LLM接続テスト — APIエラー",
+                message=f"サーバーには接続できましたがAPIが応答しません。\n\n{err}\n\n"
+                        "モデルがロード済みか確認してください。",
             ))
 
     def _idle_title(self) -> str:
