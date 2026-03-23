@@ -1,0 +1,224 @@
+"""
+Offline Voice Memo Processor
+Menu bar app for macOS.
+
+Usage:
+    python main.py
+
+Hotkey (default: Option key):
+    Press once  -> start recording
+    Press again -> stop recording, transcribe, AI-edit, paste at cursor
+"""
+import json
+import threading
+from datetime import datetime
+from pathlib import Path
+
+import rumps
+
+from config.config_manager import ConfigManager
+from core.hotkey import HotkeyListener
+from core.inserter import TextInserter
+from core.llm_client import LLMClient
+from core.notifier import notify
+from core.recorder import Recorder
+from core.transcriber import Transcriber
+
+BASE_DIR = Path(__file__).parent
+
+ICON_IDLE       = "mic"      # menu bar text when idle
+ICON_RECORDING  = "[録音中]"
+ICON_TRANSCRIBE = "[文字起こし中]"
+ICON_AI         = "[AI解析中]"
+
+
+class VoiceMemoApp(rumps.App):
+    def __init__(self):
+        super().__init__("mic", quit_button="終了")
+
+        self.config = ConfigManager(BASE_DIR / "config" / "settings.json")
+        self.settings = self.config.load()
+
+        self.recorder    = Recorder()
+        self.transcriber = Transcriber(self.settings)
+        self.llm         = LLMClient(self.settings)
+        self.inserter    = TextInserter()
+
+        self._state_lock   = threading.Lock()
+        self._is_recording = False
+        self._is_processing = False
+        self._last_result  = ""
+
+        # --- Menu ---
+        self._toggle_item = rumps.MenuItem(
+            "録音開始  [Option]", callback=self.toggle_recording
+        )
+        self._copy_item = rumps.MenuItem(
+            "最後の結果をコピー", callback=self.copy_last_result
+        )
+        self._template_menu = rumps.MenuItem("テンプレート")
+        self._reload_item = rumps.MenuItem(
+            "設定を再読み込み", callback=self.reload_settings
+        )
+
+        self.menu = [
+            self._toggle_item,
+            None,
+            self._copy_item,
+            None,
+            self._template_menu,
+            None,
+            self._reload_item,
+        ]
+
+        self._build_template_menu()
+
+        # --- Global hotkey listener ---
+        self._hotkey_listener = HotkeyListener(
+            hotkey=self.settings.get("hotkey", "alt"),
+            callback=self.toggle_recording,
+        )
+        self._hotkey_listener.start()
+
+    # ------------------------------------------------------------------
+    # Recording toggle
+    # ------------------------------------------------------------------
+
+    def toggle_recording(self, sender=None):
+        with self._state_lock:
+            if self._is_processing:
+                notify("処理中", "前の録音を処理中です")
+                return
+            if not self._is_recording:
+                self._start_recording_locked()
+            else:
+                self._stop_recording_locked()
+
+    def _start_recording_locked(self):
+        self._is_recording = True
+        self.title = ICON_RECORDING
+        self._toggle_item.title = "録音停止  [Option]"
+        self.recorder.start()
+        notify("録音開始", "Optionキーを再度押すと停止します")
+
+    def _stop_recording_locked(self):
+        self._is_recording = False
+        self._is_processing = True
+        self._toggle_item.title = "録音開始  [Option]"
+        audio_path = self.recorder.stop()
+        threading.Thread(
+            target=self._process_audio, args=(audio_path,), daemon=True
+        ).start()
+
+    # ------------------------------------------------------------------
+    # Processing pipeline (background thread)
+    # ------------------------------------------------------------------
+
+    def _process_audio(self, audio_path: Path):
+        try:
+            self.title = ICON_TRANSCRIBE
+            notify("文字起こし中...", "")
+            raw_text = self.transcriber.transcribe(audio_path)
+
+            if not raw_text.strip():
+                notify("認識失敗", "音声が認識できませんでした")
+                return
+
+            self.title = ICON_AI
+            notify("AI解析中...", raw_text[:80])
+            processed = self.llm.process(raw_text)
+
+            self._last_result = processed
+            self.inserter.insert(processed)
+            notify("完了", processed[:100])
+
+            self._save_session(audio_path, raw_text, processed)
+
+        except Exception as e:
+            notify("エラー", str(e))
+        finally:
+            with self._state_lock:
+                self._is_processing = False
+            self.title = ICON_IDLE
+
+    # ------------------------------------------------------------------
+    # Menu callbacks
+    # ------------------------------------------------------------------
+
+    def copy_last_result(self, sender):
+        if self._last_result:
+            import pyperclip
+            pyperclip.copy(self._last_result)
+            notify("コピーしました", self._last_result[:80])
+        else:
+            notify("結果なし", "まだ録音・処理していません")
+
+    def reload_settings(self, sender):
+        self.settings = self.config.load()
+        self.transcriber.update_settings(self.settings)
+        self.llm.update_settings(self.settings)
+        self._build_template_menu()
+        notify("設定再読み込み完了", "")
+
+    def _build_template_menu(self):
+        self._template_menu.clear()
+        active = self.settings.get("active_template", "memo")
+        templates = {
+            "memo":    "メモ整理",
+            "minutes": "議事録",
+            "tasks":   "タスクリスト",
+            "journal": "日記・ジャーナル",
+            "summary": "要約",
+            "raw":     "そのまま出力（LLMなし）",
+        }
+        # Add custom templates from templates/ directory
+        for f in sorted((BASE_DIR / "templates").glob("*.txt")):
+            key = f.stem
+            if key not in templates:
+                templates[key] = f"カスタム: {key}"
+
+        for key, label in templates.items():
+            prefix = "* " if key == active else "  "
+            item = rumps.MenuItem(
+                f"{prefix}{label}", callback=self._make_template_callback(key)
+            )
+            self._template_menu.add(item)
+
+    def _make_template_callback(self, template_key: str):
+        def callback(sender):
+            self.settings["active_template"] = template_key
+            self.config.save(self.settings)
+            self.llm.update_settings(self.settings)
+            self._build_template_menu()
+            notify("テンプレート変更", template_key)
+        return callback
+
+    # ------------------------------------------------------------------
+    # Session storage
+    # ------------------------------------------------------------------
+
+    def _save_session(self, audio_path: Path, raw_text: str, processed: str):
+        sessions_dir = BASE_DIR / "data" / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now()
+        record = {
+            "timestamp": ts.isoformat(),
+            "audio_path": str(audio_path),
+            "raw_text": raw_text,
+            "processed_text": processed,
+            "template": self.settings.get("active_template", "memo"),
+        }
+        out = sessions_dir / f"{ts.strftime('%Y%m%d_%H%M%S')}.json"
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False, indent=2)
+
+
+# ----------------------------------------------------------------------
+# Entry point
+# ----------------------------------------------------------------------
+
+if __name__ == "__main__":
+    for d in ["data/audio", "data/sessions", "models"]:
+        (BASE_DIR / d).mkdir(parents=True, exist_ok=True)
+
+    VoiceMemoApp().run()

@@ -1,0 +1,12 @@
+{
+  "hotkey": "alt",
+  "whisper_model": "small",
+  "whisper_language": "ja",
+  "whisper_device": "cpu",
+  "lmstudio_url": "http://localhost:1234/v1",
+  "lmstudio_model": "local-model",
+  "lmstudio_temperature": 0.3,
+  "lmstudio_max_tokens": 2048,
+  "active_template": "memo",
+  "restore_clipboard": true
+}
