@@ -55,9 +55,10 @@ class LLMClient:
 
         prompt = self._build_prompt(template_name, raw_text)
         client = self._get_client()
+        model = self._resolve_model(client)
 
         response = client.chat.completions.create(
-            model=self._settings.get("lmstudio_model", "local-model"),
+            model=model,
             messages=[
                 {
                     "role": "system",
@@ -79,6 +80,20 @@ class LLMClient:
             base_url = self._settings.get("lmstudio_url", "http://localhost:1234/v1")
             self._client = OpenAI(base_url=base_url, api_key="lm-studio")
         return self._client
+
+    def _resolve_model(self, client: "OpenAI") -> str:
+        """Return the configured model name, or auto-detect the first loaded model."""
+        configured = self._settings.get("lmstudio_model", "local-model")
+        if configured and configured != "local-model":
+            return configured
+        # Auto-detect: ask LM Studio which models are available
+        try:
+            models = client.models.list()
+            if models.data:
+                return models.data[0].id
+        except Exception:
+            pass
+        return configured
 
     def _build_prompt(self, template_name: str, text: str) -> str:
         # Custom template file takes precedence

@@ -10,6 +10,9 @@ import time
 import pyperclip
 import pyautogui
 
+# Disable fail-safe (top-left corner abort) — not needed for keyboard-only use
+pyautogui.FAILSAFE = False
+
 
 class TextInserter:
     def insert(self, text: str):
@@ -20,8 +23,11 @@ class TextInserter:
 
         try:
             pyperclip.copy(text)
-            time.sleep(0.15)  # Wait for clipboard to be ready
+            time.sleep(0.2)   # Let clipboard settle
             pyautogui.hotkey("command", "v")
+            time.sleep(0.1)   # Let paste complete
+        except Exception:
+            pass
         finally:
             threading.Thread(target=self._restore, args=(original,), daemon=True).start()
 
