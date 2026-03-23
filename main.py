@@ -28,10 +28,9 @@ from core.transcriber import Transcriber
 
 BASE_DIR = Path(__file__).parent
 
-ICON_IDLE       = "mic"
-ICON_RECORDING  = "[録音中]"
-ICON_TRANSCRIBE = "[文字起こし中]"
-ICON_AI         = "[AI解析中]"
+ICON_RECORDING  = "mic  [録音中]"
+ICON_TRANSCRIBE = "mic  [文字起こし中]"
+ICON_AI         = "mic  [AI解析中]"
 
 
 class VoiceMemoApp(rumps.App):
@@ -102,6 +101,7 @@ class VoiceMemoApp(rumps.App):
 
         self._build_template_menu()
         self._build_edit_template_menu()
+        self.title = self._idle_title()
 
         # --- Global hotkey listener (runs in background thread) ---
         self._hotkey_listener = HotkeyListener(
@@ -210,7 +210,7 @@ class VoiceMemoApp(rumps.App):
         finally:
             with self._state_lock:
                 self._is_processing = False
-            self._ui(lambda: setattr(self, "title", ICON_IDLE))
+            self._ui(lambda: setattr(self, "title", self._idle_title()))
 
     # ------------------------------------------------------------------
     # Menu callbacks
@@ -227,6 +227,12 @@ class VoiceMemoApp(rumps.App):
     # ------------------------------------------------------------------
     # LLM mode toggle
     # ------------------------------------------------------------------
+
+    def _idle_title(self) -> str:
+        if self.settings.get("llm_mode", "offline") == "online":
+            model = self.settings.get("online_model", "API")
+            return f"mic  [ONLINE: {model}]"
+        return "mic  [LOCAL]"
 
     def _llm_mode_label(self) -> str:
         mode = self.settings.get("llm_mode", "offline")
@@ -249,6 +255,7 @@ class VoiceMemoApp(rumps.App):
         self.config.save(self.settings)
         self.llm.update_settings(self.settings)
         self._llm_mode_item.title = self._llm_mode_label()
+        self.title = self._idle_title()
         notify(
             "LLMモード切替",
             "オンライン (API)" if new_mode == "online" else "オフライン (LM Studio)",
@@ -307,6 +314,7 @@ class VoiceMemoApp(rumps.App):
         self.config.save(self.settings)
         self.llm.update_settings(self.settings)
         self._llm_mode_item.title = self._llm_mode_label()
+        self.title = self._idle_title()
         notify("オンライン設定を保存しました", f"モデル: {model}")
         return True
 
@@ -423,6 +431,7 @@ class VoiceMemoApp(rumps.App):
         self._build_edit_template_menu()
         self._llm_mode_item.title = self._llm_mode_label()
         self._show_raw_item.title = self._show_raw_label()
+        self.title = self._idle_title()
         notify("設定再読み込み完了", "")
 
     def _build_template_menu(self):
