@@ -10,6 +10,9 @@ from pathlib import Path
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 
+# 要配慮個人情報（病歴等）を扱うテンプレート。外部APIへ送信してはならない。
+MEDICAL_TEMPLATES = {"shosin", "soap", "medical_summary"}
+
 BUILTIN_TEMPLATES: Dict[str, str] = {
     "memo": (
         "以下の音声文字起こしを、読みやすいメモとして整形してください。\n"
@@ -45,7 +48,7 @@ class LLMClient:
         self._settings = settings
         self._client: Optional[OpenAI] = None
 
-    def process(self, raw_text: str) -> str:
+    def process(self, raw_text: str, force_offline: bool = False) -> str:
         if not raw_text.strip():
             return ""
 
@@ -53,9 +56,13 @@ class LLMClient:
         if template_name == "raw":
             return raw_text
 
+        # force_offline=True のときは llm_mode が online でもローカル処理する
+        # （医療テンプレート使用時の外部送信ブロック用）。
+        online = self.is_online() and not force_offline
+
         prompt = self._build_prompt(template_name, raw_text)
-        client = self._get_client()
-        model = self._resolve_model(client)
+        client = self._get_client(online)
+        model = self._resolve_model(client, online)
 
         try:
             response = client.chat.completions.create(
@@ -71,7 +78,7 @@ class LLMClient:
                 max_tokens=int(self._settings.get("lmstudio_max_tokens", 2048)),
             )
         except APIConnectionError:
-            if self.is_online():
+            if online:
                 url = self._settings.get("online_api_url", "https://api.openai.com/v1")
                 raise RuntimeError(
                     f"オンラインAPIに接続できません ({url})\n"
@@ -92,20 +99,37 @@ class LLMClient:
     def is_online(self) -> bool:
         return self._settings.get("llm_mode", "offline") == "online"
 
-    def _get_client(self) -> "OpenAI":
-        if self._client is None:
-            if self.is_online():
-                base_url = self._settings.get("online_api_url", "https://api.openai.com/v1")
-                api_key  = self._settings.get("online_api_key", "")
-            else:
-                base_url = self._settings.get("lmstudio_url", "http://localhost:1234/v1")
-                api_key  = "lm-studio"
-            self._client = OpenAI(base_url=base_url, api_key=api_key or "no-key")
-        return self._client
+    def is_medical_template(self, template_name: Optional[str] = None) -> bool:
+        """現在（または指定）のテンプレートが医療用（要配慮個人情報）か判定する。"""
+        if template_name is None:
+            template_name = self._settings.get("active_template", "memo")
+        return template_name in MEDICAL_TEMPLATES
 
-    def _resolve_model(self, client: "OpenAI") -> str:
-        """Return model name for the current mode."""
-        if self.is_online():
+    def _make_client(self, online: bool) -> "OpenAI":
+        if online:
+            base_url = self._settings.get("online_api_url", "https://api.openai.com/v1")
+            api_key  = self._settings.get("online_api_key", "")
+        else:
+            base_url = self._settings.get("lmstudio_url", "http://localhost:1234/v1")
+            api_key  = "lm-studio"
+        return OpenAI(base_url=base_url, api_key=api_key or "no-key")
+
+    def _get_client(self, online: Optional[bool] = None) -> "OpenAI":
+        if online is None:
+            online = self.is_online()
+        # 永続モードと一致するときのみキャッシュを使う。
+        # force_offline による一時的なモード切替ではキャッシュを汚さない。
+        if online == self.is_online():
+            if self._client is None:
+                self._client = self._make_client(online)
+            return self._client
+        return self._make_client(online)
+
+    def _resolve_model(self, client: "OpenAI", online: Optional[bool] = None) -> str:
+        """Return model name for the given (or current) mode."""
+        if online is None:
+            online = self.is_online()
+        if online:
             return self._settings.get("online_model", "gpt-4o-mini")
 
         # Offline: use configured name or auto-detect from LM Studio

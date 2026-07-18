@@ -23,6 +23,12 @@ DEFAULTS: dict = {
     "active_template": "summary",
     "restore_clipboard": True,
     "show_raw_text": False,   # prepend raw transcription to output
+    # --- Privacy / medical safety ---
+    # 医療テンプレート（問診/SOAP/医療サマリー）選択中は外部APIへの送信を禁止し、
+    # 常にオフライン（ローカル）処理へフォールバックする。
+    "medical_templates_offline_only": True,
+    # macOS通知に文字起こし内容のプレビューを含めるか（既定は含めない）。
+    "notify_content_preview": False,
 }
 
 

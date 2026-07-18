@@ -130,6 +130,21 @@ class VoiceMemoApp(rumps.App):
                 break
 
     # ------------------------------------------------------------------
+    # Notification content guard
+    # ------------------------------------------------------------------
+
+    def _preview(self, text: str, n: int = 80) -> str:
+        """Return a text preview for notifications only if the user opted in.
+
+        macOS notifications persist in Notification Center and appear on the
+        lock screen, so transcription/AI content (which may contain patient
+        information) is withheld unless notify_content_preview is enabled.
+        """
+        if self.settings.get("notify_content_preview", False):
+            return text[:n]
+        return ""
+
+    # ------------------------------------------------------------------
     # Hotkey callback (called from pynput background thread)
     # ------------------------------------------------------------------
 
@@ -189,11 +204,29 @@ class VoiceMemoApp(rumps.App):
             raw_text = self.dictionary.apply(raw_text)
 
             self._ui(lambda: setattr(self, "title", ICON_AI))
-            notify("AI解析中...", raw_text[:80])
+            notify("AI解析中...", self._preview(raw_text))
+
+            # 医療テンプレート使用中に online モードだと患者情報が外部APIへ
+            # 送信されてしまう。medical_templates_offline_only が有効なら
+            # 強制的にローカル処理へフォールバックし、その旨を通知する。
+            force_offline = (
+                self.settings.get("medical_templates_offline_only", True)
+                and self.llm.is_medical_template()
+                and self.llm.is_online()
+            )
+            if force_offline:
+                self._ui(lambda: rumps.alert(
+                    title="医療テンプレート — 外部送信をブロックしました",
+                    message=(
+                        "医療テンプレート使用中はオンラインAPIへの送信を禁止しています。\n"
+                        "患者情報を外部に送らないよう、ローカル（LM Studio）で処理します。\n\n"
+                        "この動作は設定 medical_templates_offline_only で変更できます。"
+                    ),
+                ))
 
             llm_error_msg = None
             try:
-                processed = self.llm.process(raw_text)
+                processed = self.llm.process(raw_text, force_offline=force_offline)
             except Exception as llm_err:
                 llm_error_msg = str(llm_err)
                 processed = raw_text
@@ -214,7 +247,7 @@ class VoiceMemoApp(rumps.App):
 
             self._last_result = output
             self.inserter.insert(output)
-            notify("完了", processed[:100])
+            notify("完了", self._preview(processed, 100) or f"{len(processed)}文字")
             self._save_session(audio_path, raw_text, processed)
 
         except Exception as e:
@@ -230,9 +263,11 @@ class VoiceMemoApp(rumps.App):
 
     def copy_last_result(self, sender):
         if self._last_result:
-            import pyperclip
-            pyperclip.copy(self._last_result)
-            notify("コピーしました", self._last_result[:80])
+            self.inserter.copy(self._last_result)
+            notify(
+                "コピーしました",
+                self._preview(self._last_result) or f"{len(self._last_result)}文字",
+            )
         else:
             notify("結果なし", "まだ録音・処理していません")
 
@@ -323,10 +358,25 @@ class VoiceMemoApp(rumps.App):
         current = self.settings.get("llm_mode", "offline")
         new_mode = "online" if current == "offline" else "offline"
 
-        if new_mode == "online" and not self.settings.get("online_api_key", "").strip():
-            # API key not set yet — open settings dialog first
-            if not self._run_online_config_dialog():
-                return  # user cancelled
+        if new_mode == "online":
+            # Warn that content leaves the Mac before enabling online mode.
+            url = self.settings.get("online_api_url", "https://api.openai.com/v1")
+            confirmed = rumps.alert(
+                title="オンラインモードに切り替えますか？",
+                message=(
+                    f"文字起こし内容が外部API（{url}）に送信されます。\n"
+                    "患者情報を含む音声には使用しないでください。\n\n"
+                    "※ 医療テンプレート使用時は自動的にローカル処理へフォールバックします。"
+                ),
+                ok="オンラインにする",
+                cancel="キャンセル",
+            )
+            if not confirmed:  # cancel returns 0
+                return
+            if not self.settings.get("online_api_key", "").strip():
+                # API key not set yet — open settings dialog first
+                if not self._run_online_config_dialog():
+                    return  # user cancelled
 
         self.settings["llm_mode"] = new_mode
         self.config.save(self.settings)
