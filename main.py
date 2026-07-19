@@ -12,6 +12,7 @@ Hotkey (default: Option key):
 import json
 import queue
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from core.inserter import TextInserter
 from core.llm_client import LLMClient
 from core.notifier import notify
 from core.recorder import Recorder
+from core.secure_fs import harden, secure_dir
 from core.transcriber import Transcriber
 
 BASE_DIR = Path(__file__).parent
@@ -81,6 +83,9 @@ class VoiceMemoApp(rumps.App):
         self._show_raw_item = rumps.MenuItem(
             self._show_raw_label(), callback=self.toggle_show_raw
         )
+        self._purge_item = rumps.MenuItem(
+            "保存データを全削除...", callback=self.purge_all_data
+        )
         self._reload_item = rumps.MenuItem(
             "設定を再読み込み", callback=self.reload_settings
         )
@@ -99,6 +104,7 @@ class VoiceMemoApp(rumps.App):
             None,
             self._dict_item,
             self._show_raw_item,
+            self._purge_item,
             None,
             self._reload_item,
         ]
@@ -106,6 +112,9 @@ class VoiceMemoApp(rumps.App):
         self._build_template_menu()
         self._build_edit_template_menu()
         self.title = self._idle_title()
+
+        # Enforce the retention window at startup.
+        self._purge_old_data()
 
         # --- Global hotkey listener (runs in background thread) ---
         self._hotkey_listener = HotkeyListener(
@@ -248,11 +257,19 @@ class VoiceMemoApp(rumps.App):
             self._last_result = output
             self.inserter.insert(output)
             notify("完了", self._preview(processed, 100) or f"{len(processed)}文字")
-            self._save_session(audio_path, raw_text, processed)
+            if self.settings.get("save_sessions", False):
+                self._save_session(audio_path, raw_text, processed)
 
         except Exception as e:
             notify("エラー", str(e)[:120])
         finally:
+            # Data minimization: unless the user opted in, remove the recording
+            # so patient audio does not linger on disk.
+            if not self.settings.get("save_audio", False):
+                try:
+                    audio_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
             with self._state_lock:
                 self._is_processing = False
             self._ui(lambda: setattr(self, "title", self._idle_title()))
@@ -652,12 +669,12 @@ class VoiceMemoApp(rumps.App):
     # ------------------------------------------------------------------
 
     def _save_session(self, audio_path: Path, raw_text: str, processed: str):
-        sessions_dir = BASE_DIR / "data" / "sessions"
-        sessions_dir.mkdir(parents=True, exist_ok=True)
+        sessions_dir = secure_dir(BASE_DIR / "data" / "sessions")
         ts = datetime.now()
+        keep_audio = self.settings.get("save_audio", False)
         record = {
             "timestamp":      ts.isoformat(),
-            "audio_path":     str(audio_path),
+            "audio_path":     str(audio_path) if keep_audio else "",
             "raw_text":       raw_text,
             "processed_text": processed,
             "template":       self.settings.get("active_template", "memo"),
@@ -665,6 +682,54 @@ class VoiceMemoApp(rumps.App):
         out = sessions_dir / f"{ts.strftime('%Y%m%d_%H%M%S')}.json"
         with open(out, "w", encoding="utf-8") as f:
             json.dump(record, f, ensure_ascii=False, indent=2)
+        harden(out)  # contains transcription/AI text — owner-only
+
+    # ------------------------------------------------------------------
+    # Data retention
+    # ------------------------------------------------------------------
+
+    def _purge_old_data(self):
+        """On startup, delete recordings/sessions older than retention_days."""
+        days = int(self.settings.get("retention_days", 7))
+        if days <= 0:
+            return
+        cutoff = time.time() - days * 86400
+        for sub in ("data/audio", "data/sessions"):
+            d = BASE_DIR / sub
+            if not d.exists():
+                continue
+            for f in d.iterdir():
+                try:
+                    if f.is_file() and f.stat().st_mtime < cutoff:
+                        f.unlink()
+                except Exception:
+                    pass
+
+    def purge_all_data(self, sender):
+        resp = rumps.alert(
+            title="保存データを全削除しますか？",
+            message=(
+                "録音音声とセッション記録（文字起こし・整形結果）を"
+                "すべて削除します。元に戻せません。"
+            ),
+            ok="削除する",
+            cancel="キャンセル",
+        )
+        if not resp:  # cancel
+            return
+        count = 0
+        for sub in ("data/audio", "data/sessions"):
+            d = BASE_DIR / sub
+            if not d.exists():
+                continue
+            for f in d.iterdir():
+                try:
+                    if f.is_file():
+                        f.unlink()
+                        count += 1
+                except Exception:
+                    pass
+        notify("保存データを削除しました", f"{count} 件")
 
 
 # ----------------------------------------------------------------------
@@ -672,7 +737,8 @@ class VoiceMemoApp(rumps.App):
 # ----------------------------------------------------------------------
 
 if __name__ == "__main__":
-    for d in ["data/audio", "data/sessions", "models"]:
-        (BASE_DIR / d).mkdir(parents=True, exist_ok=True)
+    for d in ["data/audio", "data/sessions"]:
+        secure_dir(BASE_DIR / d)
+    (BASE_DIR / "models").mkdir(parents=True, exist_ok=True)
 
     VoiceMemoApp().run()

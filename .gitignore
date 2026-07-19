@@ -6,4 +6,8 @@ __pycache__/
 *.pyo
 .DS_Store
 .claude/
+
+# --- Local config that may contain secrets or patient-identifying terms ---
 config/settings.json
+config/dictionary.json
+templates/custom.txt
