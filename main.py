@@ -424,11 +424,19 @@ class VoiceMemoApp(rumps.App):
             return False
         api_url = r.text.strip() or "https://api.openai.com/v1"
 
-        # 2. API Key
+        # 2. API Key (stored in the macOS Keychain, never shown or prefilled)
+        has_key = bool(self.settings.get("online_api_key", "").strip())
+        key_msg = "APIキーを入力してください。\n(OpenAI: sk-...  /  Anthropic: sk-ant-...  など)"
+        if has_key:
+            key_msg = (
+                "APIキーは設定済みです（Keychainに保存）。\n"
+                "変更する場合のみ新しいキーを入力してください。\n"
+                "空欄のまま「次へ」で現在のキーを維持します。"
+            )
         win = rumps.Window(
-            message="APIキーを入力してください。\n(OpenAI: sk-...  /  Anthropic: sk-ant-...  など)",
+            message=key_msg,
             title="オンライン設定 (2/3) — APIキー",
-            default_text=self.settings.get("online_api_key", ""),
+            default_text="",  # never prefill the secret into the dialog
             ok="次へ",
             cancel="キャンセル",
             dimensions=(420, 30),
@@ -436,7 +444,8 @@ class VoiceMemoApp(rumps.App):
         r = win.run()
         if not r.clicked:
             return False
-        api_key = r.text.strip()
+        # Keep the existing key when the field is left blank.
+        api_key = r.text.strip() or self.settings.get("online_api_key", "")
 
         # 3. Model name
         win = rumps.Window(
