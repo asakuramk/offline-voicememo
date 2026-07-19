@@ -153,6 +153,70 @@ class VoiceMemoApp(rumps.App):
             return text[:n]
         return ""
 
+    def _ask_on_main(self, func):
+        """Run func() on the main thread and block the caller until it returns.
+
+        Lets a background pipeline thread show a modal dialog (which must run on
+        the main thread) and wait for the user's decision.
+        """
+        result = {}
+        done = threading.Event()
+
+        def wrapper():
+            try:
+                result["value"] = func()
+            finally:
+                done.set()
+
+        self._ui(wrapper)
+        done.wait()
+        return result.get("value")
+
+    @staticmethod
+    def _frontmost_app_name() -> str:
+        """Name of the app that will receive the paste (captured before our dialog)."""
+        try:
+            from AppKit import NSWorkspace
+            app = NSWorkspace.sharedWorkspace().frontmostApplication()
+            return app.localizedName() if app else "不明"
+        except Exception:
+            return "不明"
+
+    def _confirm_medical_insert(self, output: str, raw_text: str, app_name: str):
+        """Modal confirmation for medical output. Returns (decision, edited_text).
+
+        decision is one of "insert" | "copy" | "discard". edited_text carries any
+        manual correction the user made (or None when discarded).
+
+        Buttons are ok + add_button only (no cancel): rumps' Response.clicked
+        collides when a cancel button and add_button are combined, so the default
+        (safe) action is "コピーのみ" — it never auto-pastes into the active app.
+        """
+        message = (
+            "⚠️ 医療テンプレートの結果です。挿入前に必ず内容を確認してください。\n"
+            "・数値 / 薬剤名 / 用量 / 単位 は原文と必ず照合してください。\n"
+            "・原文にない情報がAIによって追加されていないか確認してください。\n"
+            f"・挿入先アプリ: {app_name}\n"
+            "下のテキストはこの場で修正できます。\n\n"
+            "【文字起こし原文（照合用）】\n"
+            f"{raw_text}"
+        )
+        win = rumps.Window(
+            message=message,
+            title="医療テンプレート — 挿入前の確認",
+            default_text=output,
+            ok="コピーのみ",   # default / Enter — safe, never auto-pastes
+            dimensions=(560, 320),
+        )
+        win.add_button("そのまま挿入")
+        win.add_button("破棄")
+        r = win.run()
+        if r.clicked == 2:       # そのまま挿入
+            return ("insert", r.text)
+        if r.clicked == 3:       # 破棄
+            return ("discard", None)
+        return ("copy", r.text)  # コピーのみ (ok / default)
+
     # ------------------------------------------------------------------
     # Hotkey callback (called from pynput background thread)
     # ------------------------------------------------------------------
@@ -254,10 +318,34 @@ class VoiceMemoApp(rumps.App):
             else:
                 output = f"⚠️ LLM未接続\n{processed}" if llm_error_msg else processed
 
-            self._last_result = output
-            self.inserter.insert(output)
-            notify("完了", self._preview(processed, 100) or f"{len(processed)}文字")
-            if self.settings.get("save_sessions", False):
+            # 医療テンプレートは幻覚・誤転写がそのままカルテに入らないよう、
+            # 挿入前に確認ダイアログを出す（M-1, M-4）。ユーザーは結果を修正でき、
+            # 「挿入 / コピーのみ / 破棄」を選べる。
+            if (self.settings.get("medical_confirm_before_insert", True)
+                    and self.llm.is_medical_template()):
+                app_name = self._frontmost_app_name()
+                decision, edited = self._ask_on_main(
+                    lambda: self._confirm_medical_insert(output, raw_text, app_name)
+                )
+                output = edited if edited is not None else output
+            else:
+                decision = "insert"
+
+            if decision == "discard":
+                notify("破棄しました", "結果は挿入されませんでした")
+            elif decision == "copy":
+                self._last_result = output
+                self.inserter.copy(output)
+                notify(
+                    "クリップボードにコピーしました",
+                    self._preview(output, 100) or f"{len(output)}文字",
+                )
+            else:  # insert
+                self._last_result = output
+                self.inserter.insert(output)
+                notify("完了", self._preview(processed, 100) or f"{len(processed)}文字")
+
+            if decision != "discard" and self.settings.get("save_sessions", False):
                 self._save_session(audio_path, raw_text, processed)
 
         except Exception as e:

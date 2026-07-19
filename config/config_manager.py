@@ -41,6 +41,8 @@ DEFAULTS: dict = {
     # 医療テンプレート（問診/SOAP/医療サマリー）選択中は外部APIへの送信を禁止し、
     # 常にオフライン（ローカル）処理へフォールバックする。
     "medical_templates_offline_only": True,
+    # 医療テンプレート使用時、カルテ等へ挿入する前に確認ダイアログを表示する。
+    "medical_confirm_before_insert": True,
     # macOS通知に文字起こし内容のプレビューを含めるか（既定は含めない）。
     "notify_content_preview": False,
     # --- Data retention ---

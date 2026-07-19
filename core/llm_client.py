@@ -60,6 +60,24 @@ class LLMClient:
         # （医療テンプレート使用時の外部送信ブロック用）。
         online = self.is_online() and not force_offline
 
+        # 医療テンプレートでは幻覚を避けるため system 指示を強化し、温度を0にする。
+        is_medical = self.is_medical_template(template_name)
+        system_content = (
+            "あなたは日本語の音声文字起こしを整形するアシスタントです。"
+            "指示通りに整形し、余計な説明は不要です。"
+        )
+        if is_medical:
+            system_content += (
+                "これは医療記録です。文字起こしに含まれない情報を推測・補完・"
+                "追加してはいけません。新たな診断や治療方針を提案せず、"
+                "薬剤名・数値・用量・単位は原文のまま保持してください。"
+                "判断できない項目は「（記載なし）」としてください。"
+            )
+        temperature = (
+            0.0 if is_medical
+            else float(self._settings.get("lmstudio_temperature", 0.3))
+        )
+
         prompt = self._build_prompt(template_name, raw_text)
         client = self._get_client(online)
         model = self._resolve_model(client, online)
@@ -68,13 +86,10 @@ class LLMClient:
             response = client.chat.completions.create(
                 model=model,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": "あなたは日本語の音声文字起こしを整形するアシスタントです。指示通りに整形し、余計な説明は不要です。",
-                    },
+                    {"role": "system", "content": system_content},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=float(self._settings.get("lmstudio_temperature", 0.3)),
+                temperature=temperature,
                 max_tokens=int(self._settings.get("lmstudio_max_tokens", 2048)),
             )
         except APIConnectionError:
