@@ -1,6 +1,22 @@
 # offline-voicememo セキュリティ・医療AIガイドライン準拠 修正計画
 
-作成日: 2026-07-19 / 対象: 全コードベース精査（コード変更なし、計画のみ）
+作成日: 2026-07-19 / 対象: 全コードベース精査
+
+## 実装状況（2026-07-19, ブランチ feat/security-hardening）
+
+- ✅ Phase 1（C-1〜C-3）外部流出の遮断 — commit 9c673c0
+- ✅ Phase 2（H-1, H-2, H-4）保存データ保護 — commit b6f25ef
+- ✅ Phase 3（H-3）APIキーの Keychain 移行 — commit eb9382b
+- ✅ Phase 4（M-1〜M-4）医療AI出力の安全策 — commit 7f0332c
+- ✅ Phase 5（L-1〜L-5）堅牢化・運用ドキュメント — commit 3f78b57
+
+検証: 各フェーズを openai/keyring をスタブしたユニットテスト＋`py_compile` で確認済み。
+ただし venv・マイク・LM Studio・GUI が無い環境のため**アプリの実起動は未実施**。
+実機での確認が必要な項目:
+- 挿入前確認ダイアログ（rumps.Window の3ボタン挙動）
+- NSPasteboard ConcealedType のクリップボード履歴/ユニバーサルクリップボード抑止効果
+- keyring による実 Keychain への保存/移行
+- 録音開始/停止サウンド、通知表示
 
 想定準拠先:
 - 厚労省「医療情報システムの安全管理に関するガイドライン 第6.0版」
