@@ -51,6 +51,8 @@ DEFAULTS: dict = {
     "save_sessions": False,
     # 保存を有効にした場合の保持日数。起動時にこれを過ぎたデータを自動削除する。
     "retention_days": 7,
+    # 録音の開始/停止時にシステムサウンドを鳴らす（録音中であることの明示）。
+    "record_sounds": True,
 }
 
 

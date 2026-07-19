@@ -13,8 +13,9 @@ import time
 import pyautogui
 from AppKit import NSPasteboard
 
-# Disable fail-safe (top-left corner abort) — not needed for keyboard-only use
-pyautogui.FAILSAFE = False
+# Keep pyautogui's fail-safe enabled (default). We only send Cmd+V (no mouse
+# movement), so it never triggers in normal use but stays available as a guard.
+pyautogui.FAILSAFE = True
 
 # UTI for plain text on the general pasteboard.
 TEXT_TYPE = "public.utf8-plain-text"

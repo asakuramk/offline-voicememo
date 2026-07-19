@@ -15,6 +15,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import rumps
 
@@ -23,7 +24,7 @@ from core.dictionary import Dictionary
 from core.hotkey import HotkeyListener
 from core.inserter import TextInserter
 from core.llm_client import LLMClient
-from core.notifier import notify
+from core.notifier import notify, play_sound
 from core.recorder import Recorder
 from core.secure_fs import harden, secure_dir
 from core.transcriber import Transcriber
@@ -247,6 +248,8 @@ class VoiceMemoApp(rumps.App):
         self._is_recording = True
         self.title = ICON_RECORDING
         self._toggle_item.title = "録音停止  [Option]"
+        if self.settings.get("record_sounds", True):
+            play_sound("Tink")
         self.recorder.start()
         notify("録音開始", "Optionキーを再度押すと停止します")
 
@@ -254,6 +257,8 @@ class VoiceMemoApp(rumps.App):
         self._is_recording  = False
         self._is_processing = True
         self._toggle_item.title = "録音開始  [Option]"
+        if self.settings.get("record_sounds", True):
+            play_sound("Pop")
         audio_path = self.recorder.stop()
         threading.Thread(
             target=self._process_audio, args=(audio_path,), daemon=True
@@ -496,6 +501,19 @@ class VoiceMemoApp(rumps.App):
     def configure_online(self, sender):
         self._run_online_config_dialog()
 
+    @staticmethod
+    def _valid_online_url(url: str) -> bool:
+        """Require https for online APIs; allow http only for localhost."""
+        try:
+            p = urlparse(url)
+        except Exception:
+            return False
+        if p.scheme == "https":
+            return True
+        if p.scheme == "http" and p.hostname in ("localhost", "127.0.0.1", "::1"):
+            return True
+        return False
+
     def _run_online_config_dialog(self) -> bool:
         """Show 3 dialogs to set online API URL / key / model. Returns True if saved."""
         # 1. API URL
@@ -511,6 +529,15 @@ class VoiceMemoApp(rumps.App):
         if not r.clicked:
             return False
         api_url = r.text.strip() or "https://api.openai.com/v1"
+        if not self._valid_online_url(api_url):
+            rumps.alert(
+                title="URLエラー",
+                message=(
+                    "オンラインAPIのURLは https:// で指定してください。\n"
+                    "（http:// は localhost のみ許可されます）"
+                ),
+            )
+            return False
 
         # 2. API Key (stored in the macOS Keychain, never shown or prefilled)
         has_key = bool(self.settings.get("online_api_key", "").strip())
