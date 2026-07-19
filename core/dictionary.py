@@ -12,6 +12,8 @@ import json
 import re
 from pathlib import Path
 
+from core.secure_fs import harden, secure_dir
+
 DICT_PATH = Path(__file__).parent.parent / "config" / "dictionary.json"
 
 EDITOR_HEADER = """\
@@ -73,7 +75,8 @@ class Dictionary:
             if src:
                 entries[src] = dst
         self._entries = entries
-        DICT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        secure_dir(DICT_PATH.parent)
         DICT_PATH.write_text(
             json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        harden(DICT_PATH)  # may contain names/facility terms — owner-only

@@ -12,8 +12,10 @@ Hotkey (default: Option key):
 import json
 import queue
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import rumps
 
@@ -22,8 +24,9 @@ from core.dictionary import Dictionary
 from core.hotkey import HotkeyListener
 from core.inserter import TextInserter
 from core.llm_client import LLMClient
-from core.notifier import notify
+from core.notifier import notify, play_sound
 from core.recorder import Recorder
+from core.secure_fs import harden, secure_dir
 from core.transcriber import Transcriber
 
 BASE_DIR = Path(__file__).parent
@@ -81,6 +84,9 @@ class VoiceMemoApp(rumps.App):
         self._show_raw_item = rumps.MenuItem(
             self._show_raw_label(), callback=self.toggle_show_raw
         )
+        self._purge_item = rumps.MenuItem(
+            "保存データを全削除...", callback=self.purge_all_data
+        )
         self._reload_item = rumps.MenuItem(
             "設定を再読み込み", callback=self.reload_settings
         )
@@ -99,6 +105,7 @@ class VoiceMemoApp(rumps.App):
             None,
             self._dict_item,
             self._show_raw_item,
+            self._purge_item,
             None,
             self._reload_item,
         ]
@@ -106,6 +113,9 @@ class VoiceMemoApp(rumps.App):
         self._build_template_menu()
         self._build_edit_template_menu()
         self.title = self._idle_title()
+
+        # Enforce the retention window at startup.
+        self._purge_old_data()
 
         # --- Global hotkey listener (runs in background thread) ---
         self._hotkey_listener = HotkeyListener(
@@ -128,6 +138,85 @@ class VoiceMemoApp(rumps.App):
                 self._ui_queue.get_nowait()()
             except queue.Empty:
                 break
+
+    # ------------------------------------------------------------------
+    # Notification content guard
+    # ------------------------------------------------------------------
+
+    def _preview(self, text: str, n: int = 80) -> str:
+        """Return a text preview for notifications only if the user opted in.
+
+        macOS notifications persist in Notification Center and appear on the
+        lock screen, so transcription/AI content (which may contain patient
+        information) is withheld unless notify_content_preview is enabled.
+        """
+        if self.settings.get("notify_content_preview", False):
+            return text[:n]
+        return ""
+
+    def _ask_on_main(self, func):
+        """Run func() on the main thread and block the caller until it returns.
+
+        Lets a background pipeline thread show a modal dialog (which must run on
+        the main thread) and wait for the user's decision.
+        """
+        result = {}
+        done = threading.Event()
+
+        def wrapper():
+            try:
+                result["value"] = func()
+            finally:
+                done.set()
+
+        self._ui(wrapper)
+        done.wait()
+        return result.get("value")
+
+    @staticmethod
+    def _frontmost_app_name() -> str:
+        """Name of the app that will receive the paste (captured before our dialog)."""
+        try:
+            from AppKit import NSWorkspace
+            app = NSWorkspace.sharedWorkspace().frontmostApplication()
+            return app.localizedName() if app else "不明"
+        except Exception:
+            return "不明"
+
+    def _confirm_medical_insert(self, output: str, raw_text: str, app_name: str):
+        """Modal confirmation for medical output. Returns (decision, edited_text).
+
+        decision is one of "insert" | "copy" | "discard". edited_text carries any
+        manual correction the user made (or None when discarded).
+
+        Buttons are ok + add_button only (no cancel): rumps' Response.clicked
+        collides when a cancel button and add_button are combined, so the default
+        (safe) action is "コピーのみ" — it never auto-pastes into the active app.
+        """
+        message = (
+            "⚠️ 医療テンプレートの結果です。挿入前に必ず内容を確認してください。\n"
+            "・数値 / 薬剤名 / 用量 / 単位 は原文と必ず照合してください。\n"
+            "・原文にない情報がAIによって追加されていないか確認してください。\n"
+            f"・挿入先アプリ: {app_name}\n"
+            "下のテキストはこの場で修正できます。\n\n"
+            "【文字起こし原文（照合用）】\n"
+            f"{raw_text}"
+        )
+        win = rumps.Window(
+            message=message,
+            title="医療テンプレート — 挿入前の確認",
+            default_text=output,
+            ok="コピーのみ",   # default / Enter — safe, never auto-pastes
+            dimensions=(560, 320),
+        )
+        win.add_button("そのまま挿入")
+        win.add_button("破棄")
+        r = win.run()
+        if r.clicked == 2:       # そのまま挿入
+            return ("insert", r.text)
+        if r.clicked == 3:       # 破棄
+            return ("discard", None)
+        return ("copy", r.text)  # コピーのみ (ok / default)
 
     # ------------------------------------------------------------------
     # Hotkey callback (called from pynput background thread)
@@ -159,6 +248,8 @@ class VoiceMemoApp(rumps.App):
         self._is_recording = True
         self.title = ICON_RECORDING
         self._toggle_item.title = "録音停止  [Option]"
+        if self.settings.get("record_sounds", True):
+            play_sound("Tink")
         self.recorder.start()
         notify("録音開始", "Optionキーを再度押すと停止します")
 
@@ -166,6 +257,8 @@ class VoiceMemoApp(rumps.App):
         self._is_recording  = False
         self._is_processing = True
         self._toggle_item.title = "録音開始  [Option]"
+        if self.settings.get("record_sounds", True):
+            play_sound("Pop")
         audio_path = self.recorder.stop()
         threading.Thread(
             target=self._process_audio, args=(audio_path,), daemon=True
@@ -189,11 +282,29 @@ class VoiceMemoApp(rumps.App):
             raw_text = self.dictionary.apply(raw_text)
 
             self._ui(lambda: setattr(self, "title", ICON_AI))
-            notify("AI解析中...", raw_text[:80])
+            notify("AI解析中...", self._preview(raw_text))
+
+            # 医療テンプレート使用中に online モードだと患者情報が外部APIへ
+            # 送信されてしまう。medical_templates_offline_only が有効なら
+            # 強制的にローカル処理へフォールバックし、その旨を通知する。
+            force_offline = (
+                self.settings.get("medical_templates_offline_only", True)
+                and self.llm.is_medical_template()
+                and self.llm.is_online()
+            )
+            if force_offline:
+                self._ui(lambda: rumps.alert(
+                    title="医療テンプレート — 外部送信をブロックしました",
+                    message=(
+                        "医療テンプレート使用中はオンラインAPIへの送信を禁止しています。\n"
+                        "患者情報を外部に送らないよう、ローカル（LM Studio）で処理します。\n\n"
+                        "この動作は設定 medical_templates_offline_only で変更できます。"
+                    ),
+                ))
 
             llm_error_msg = None
             try:
-                processed = self.llm.process(raw_text)
+                processed = self.llm.process(raw_text, force_offline=force_offline)
             except Exception as llm_err:
                 llm_error_msg = str(llm_err)
                 processed = raw_text
@@ -212,14 +323,46 @@ class VoiceMemoApp(rumps.App):
             else:
                 output = f"⚠️ LLM未接続\n{processed}" if llm_error_msg else processed
 
-            self._last_result = output
-            self.inserter.insert(output)
-            notify("完了", processed[:100])
-            self._save_session(audio_path, raw_text, processed)
+            # 医療テンプレートは幻覚・誤転写がそのままカルテに入らないよう、
+            # 挿入前に確認ダイアログを出す（M-1, M-4）。ユーザーは結果を修正でき、
+            # 「挿入 / コピーのみ / 破棄」を選べる。
+            if (self.settings.get("medical_confirm_before_insert", True)
+                    and self.llm.is_medical_template()):
+                app_name = self._frontmost_app_name()
+                decision, edited = self._ask_on_main(
+                    lambda: self._confirm_medical_insert(output, raw_text, app_name)
+                )
+                output = edited if edited is not None else output
+            else:
+                decision = "insert"
+
+            if decision == "discard":
+                notify("破棄しました", "結果は挿入されませんでした")
+            elif decision == "copy":
+                self._last_result = output
+                self.inserter.copy(output)
+                notify(
+                    "クリップボードにコピーしました",
+                    self._preview(output, 100) or f"{len(output)}文字",
+                )
+            else:  # insert
+                self._last_result = output
+                self.inserter.insert(output)
+                notify("完了", self._preview(processed, 100) or f"{len(processed)}文字")
+
+            if decision != "discard" and self.settings.get("save_sessions", False):
+                self._save_session(audio_path, raw_text, processed)
 
         except Exception as e:
             notify("エラー", str(e)[:120])
         finally:
+            # Data minimization: unless the user opted in, remove the recording
+            # so patient audio does not linger on disk.
+            if not self.settings.get("save_audio", False):
+                try:
+                    audio_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
             with self._state_lock:
                 self._is_processing = False
             self._ui(lambda: setattr(self, "title", self._idle_title()))
@@ -230,9 +373,11 @@ class VoiceMemoApp(rumps.App):
 
     def copy_last_result(self, sender):
         if self._last_result:
-            import pyperclip
-            pyperclip.copy(self._last_result)
-            notify("コピーしました", self._last_result[:80])
+            self.inserter.copy(self._last_result)
+            notify(
+                "コピーしました",
+                self._preview(self._last_result) or f"{len(self._last_result)}文字",
+            )
         else:
             notify("結果なし", "まだ録音・処理していません")
 
@@ -323,10 +468,25 @@ class VoiceMemoApp(rumps.App):
         current = self.settings.get("llm_mode", "offline")
         new_mode = "online" if current == "offline" else "offline"
 
-        if new_mode == "online" and not self.settings.get("online_api_key", "").strip():
-            # API key not set yet — open settings dialog first
-            if not self._run_online_config_dialog():
-                return  # user cancelled
+        if new_mode == "online":
+            # Warn that content leaves the Mac before enabling online mode.
+            url = self.settings.get("online_api_url", "https://api.openai.com/v1")
+            confirmed = rumps.alert(
+                title="オンラインモードに切り替えますか？",
+                message=(
+                    f"文字起こし内容が外部API（{url}）に送信されます。\n"
+                    "患者情報を含む音声には使用しないでください。\n\n"
+                    "※ 医療テンプレート使用時は自動的にローカル処理へフォールバックします。"
+                ),
+                ok="オンラインにする",
+                cancel="キャンセル",
+            )
+            if not confirmed:  # cancel returns 0
+                return
+            if not self.settings.get("online_api_key", "").strip():
+                # API key not set yet — open settings dialog first
+                if not self._run_online_config_dialog():
+                    return  # user cancelled
 
         self.settings["llm_mode"] = new_mode
         self.config.save(self.settings)
@@ -340,6 +500,19 @@ class VoiceMemoApp(rumps.App):
 
     def configure_online(self, sender):
         self._run_online_config_dialog()
+
+    @staticmethod
+    def _valid_online_url(url: str) -> bool:
+        """Require https for online APIs; allow http only for localhost."""
+        try:
+            p = urlparse(url)
+        except Exception:
+            return False
+        if p.scheme == "https":
+            return True
+        if p.scheme == "http" and p.hostname in ("localhost", "127.0.0.1", "::1"):
+            return True
+        return False
 
     def _run_online_config_dialog(self) -> bool:
         """Show 3 dialogs to set online API URL / key / model. Returns True if saved."""
@@ -356,12 +529,29 @@ class VoiceMemoApp(rumps.App):
         if not r.clicked:
             return False
         api_url = r.text.strip() or "https://api.openai.com/v1"
+        if not self._valid_online_url(api_url):
+            rumps.alert(
+                title="URLエラー",
+                message=(
+                    "オンラインAPIのURLは https:// で指定してください。\n"
+                    "（http:// は localhost のみ許可されます）"
+                ),
+            )
+            return False
 
-        # 2. API Key
+        # 2. API Key (stored in the macOS Keychain, never shown or prefilled)
+        has_key = bool(self.settings.get("online_api_key", "").strip())
+        key_msg = "APIキーを入力してください。\n(OpenAI: sk-...  /  Anthropic: sk-ant-...  など)"
+        if has_key:
+            key_msg = (
+                "APIキーは設定済みです（Keychainに保存）。\n"
+                "変更する場合のみ新しいキーを入力してください。\n"
+                "空欄のまま「次へ」で現在のキーを維持します。"
+            )
         win = rumps.Window(
-            message="APIキーを入力してください。\n(OpenAI: sk-...  /  Anthropic: sk-ant-...  など)",
+            message=key_msg,
             title="オンライン設定 (2/3) — APIキー",
-            default_text=self.settings.get("online_api_key", ""),
+            default_text="",  # never prefill the secret into the dialog
             ok="次へ",
             cancel="キャンセル",
             dimensions=(420, 30),
@@ -369,7 +559,8 @@ class VoiceMemoApp(rumps.App):
         r = win.run()
         if not r.clicked:
             return False
-        api_key = r.text.strip()
+        # Keep the existing key when the field is left blank.
+        api_key = r.text.strip() or self.settings.get("online_api_key", "")
 
         # 3. Model name
         win = rumps.Window(
@@ -602,12 +793,12 @@ class VoiceMemoApp(rumps.App):
     # ------------------------------------------------------------------
 
     def _save_session(self, audio_path: Path, raw_text: str, processed: str):
-        sessions_dir = BASE_DIR / "data" / "sessions"
-        sessions_dir.mkdir(parents=True, exist_ok=True)
+        sessions_dir = secure_dir(BASE_DIR / "data" / "sessions")
         ts = datetime.now()
+        keep_audio = self.settings.get("save_audio", False)
         record = {
             "timestamp":      ts.isoformat(),
-            "audio_path":     str(audio_path),
+            "audio_path":     str(audio_path) if keep_audio else "",
             "raw_text":       raw_text,
             "processed_text": processed,
             "template":       self.settings.get("active_template", "memo"),
@@ -615,6 +806,54 @@ class VoiceMemoApp(rumps.App):
         out = sessions_dir / f"{ts.strftime('%Y%m%d_%H%M%S')}.json"
         with open(out, "w", encoding="utf-8") as f:
             json.dump(record, f, ensure_ascii=False, indent=2)
+        harden(out)  # contains transcription/AI text — owner-only
+
+    # ------------------------------------------------------------------
+    # Data retention
+    # ------------------------------------------------------------------
+
+    def _purge_old_data(self):
+        """On startup, delete recordings/sessions older than retention_days."""
+        days = int(self.settings.get("retention_days", 7))
+        if days <= 0:
+            return
+        cutoff = time.time() - days * 86400
+        for sub in ("data/audio", "data/sessions"):
+            d = BASE_DIR / sub
+            if not d.exists():
+                continue
+            for f in d.iterdir():
+                try:
+                    if f.is_file() and f.stat().st_mtime < cutoff:
+                        f.unlink()
+                except Exception:
+                    pass
+
+    def purge_all_data(self, sender):
+        resp = rumps.alert(
+            title="保存データを全削除しますか？",
+            message=(
+                "録音音声とセッション記録（文字起こし・整形結果）を"
+                "すべて削除します。元に戻せません。"
+            ),
+            ok="削除する",
+            cancel="キャンセル",
+        )
+        if not resp:  # cancel
+            return
+        count = 0
+        for sub in ("data/audio", "data/sessions"):
+            d = BASE_DIR / sub
+            if not d.exists():
+                continue
+            for f in d.iterdir():
+                try:
+                    if f.is_file():
+                        f.unlink()
+                        count += 1
+                except Exception:
+                    pass
+        notify("保存データを削除しました", f"{count} 件")
 
 
 # ----------------------------------------------------------------------
@@ -622,7 +861,8 @@ class VoiceMemoApp(rumps.App):
 # ----------------------------------------------------------------------
 
 if __name__ == "__main__":
-    for d in ["data/audio", "data/sessions", "models"]:
-        (BASE_DIR / d).mkdir(parents=True, exist_ok=True)
+    for d in ["data/audio", "data/sessions"]:
+        secure_dir(BASE_DIR / d)
+    (BASE_DIR / "models").mkdir(parents=True, exist_ok=True)
 
     VoiceMemoApp().run()

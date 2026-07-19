@@ -28,6 +28,14 @@ pip install --upgrade pip -q
 echo "-> 依存パッケージをインストール中..."
 pip install -r requirements.txt
 
+# Record the exact installed versions for reproducibility / auditing.
+echo "-> インストール済みバージョンを requirements.lock.txt に記録..."
+pip freeze > requirements.lock.txt
+
+# Vulnerability scan (best effort; does not fail setup)
+echo "-> 依存パッケージの脆弱性をスキャン (pip-audit)..."
+pip install -q pip-audit && pip-audit || echo "[注意] pip-audit をスキップ/失敗しました（後で 'pip-audit' を実行してください）"
+
 echo ""
 echo "========================================"
 echo "  セットアップ完了!"
